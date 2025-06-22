@@ -82,12 +82,13 @@ func (l *Logger) LogSearch(ctx context.Context, userID, userAgent, query string)
 	}
 
 	err1 := l.Redis.Set(ctx, redisKey, normalizedQuery, 10*time.Second).Err()
-	err2 := l.Redis.Set(ctx, bufferKey, normalizedQuery, 1*time.Hour).Err()
+	err2 := l.Redis.Set(ctx, bufferKey, normalizedQuery, 20*time.Second).Err()
 	if err1 != nil || err2 != nil {
 		log.Printf("LogSearch: Redis set error: key=%s err1=%v, bufferKey=%s err2=%v", redisKey, err1, bufferKey, err2)
 		return fmt.Errorf("redis set error: %v %v", err1, err2)
 	}
-	log.Printf("LogSearch: updated Redis and buffer with new query for userID=%s", userID)
+	lastQuery, _ = l.Redis.Get(ctx, redisKey).Result()
+	log.Printf("LogSearch: updated Redis and buffer with new query for redisKey=%s", redisKey)
 	return nil
 }
 
@@ -124,7 +125,7 @@ func (l *Logger) writeSearch(ctx context.Context, entry SearchEntry) error {
 
 // generateAnonID generates a stable anonymous ID from the User-Agent string.
 func generateAnonID(userAgent string) string {
-	return "anon:" + fmt.Sprintf("%x", sha256.Sum256([]byte(userAgent)))
+	return "anon" + fmt.Sprintf("%x", sha256.Sum256([]byte(userAgent)))
 }
 
 // StartKeyspaceListener listens to Redis key expiry events and flushes expired queries to the DB.
@@ -154,19 +155,17 @@ func (l *Logger) StartKeyspaceListener(ctx context.Context) {
 				continue
 			}
 
-			isAnon := strings.HasPrefix(userID, "anon:") // robust check for anon ID
-
+			isAnon := strings.HasPrefix(userID, "anon") // robust check for anon ID
 			entry := SearchEntry{
 				UserID: "",
 				Query:  query,
 				AnonID: "",
 			}
 			if isAnon {
-				entry.AnonID = userID
+				entry.AnonID = "anon" + userID
 			} else {
 				entry.UserID = userID
 			}
-
 			if err := l.writeSearch(ctx, entry); err != nil {
 				log.Printf("KeyspaceListener: failed to write search to DB for userID=%s: %v", userID, err)
 				continue
