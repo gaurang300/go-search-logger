@@ -161,7 +161,7 @@ func (l *Logger) StartKeyspaceListener(ctx context.Context) {
 				AnonID: "",
 			}
 			if isAnon {
-				entry.AnonID = "anon" + userID
+				entry.AnonID = userID
 			} else {
 				entry.UserID = userID
 			}
