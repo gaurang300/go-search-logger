@@ -82,12 +82,11 @@ func (l *Logger) LogSearch(ctx context.Context, userID, userAgent, query string)
 	}
 
 	err1 := l.Redis.Set(ctx, redisKey, normalizedQuery, 10*time.Second).Err()
-	err2 := l.Redis.Set(ctx, bufferKey, normalizedQuery, 20*time.Second).Err()
+	err2 := l.Redis.Set(ctx, bufferKey, normalizedQuery, 1*time.Hour).Err()
 	if err1 != nil || err2 != nil {
 		log.Printf("LogSearch: Redis set error: key=%s err1=%v, bufferKey=%s err2=%v", redisKey, err1, bufferKey, err2)
 		return fmt.Errorf("redis set error: %v %v", err1, err2)
 	}
-	lastQuery, _ = l.Redis.Get(ctx, redisKey).Result()
 	log.Printf("LogSearch: updated Redis and buffer with new query for redisKey=%s", redisKey)
 	return nil
 }
