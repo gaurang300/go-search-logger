@@ -52,17 +52,22 @@ func getLatestQuery(t *testing.T, logger *Logger, userID string) string {
 }
 
 // FlushUser writes the last search query for a user from Redis to the DB.
-func (l *Logger) FlushUser(ctx context.Context, userID string) error {
+func (l *Logger) FlushUser(ctx context.Context, userID string, anonID string) error {
 	key := buildRedisKey(userID)
-	query, err := l.Redis.Get(ctx, key).Result()
-	if err != nil || query == "" {
-		// Nothing to flush or error getting key
-		return err
+	if userID == "" {
+		key = buildRedisKey(anonID)
+	}
+
+	query, _ := l.Redis.Get(ctx, key).Result()
+	if query == "" {
+		// Do not write empty queries to the DB
+		return nil
 	}
 	// Write the last query to the DB
 	entry := SearchEntry{
 		UserID: userID,
 		Query:  query,
+		AnonID: anonID,
 		// Add other required fields if needed, e.g. Timestamp, UserAgent, etc.
 	}
 	return l.writeSearch(ctx, entry)
@@ -85,7 +90,7 @@ func TestLogSearchAndWrite(t *testing.T) {
 	_ = logger.LogSearch(ctx, userID, userAgent, "testquery")
 
 	anonID := generateAnonID(userAgent)
-	_ = logger.FlushUser(ctx, anonID)
+	_ = logger.FlushUser(ctx, "", anonID)
 	searchText := getLatestQuery(t, logger, anonID)
 	if searchText != query {
 		t.Errorf("expected 'testquery', got '%s'", searchText)
@@ -111,6 +116,11 @@ func TestAnonSearchReset(t *testing.T) {
 	if got != "business" {
 		t.Errorf("expected 'business', got '%s'", got)
 	}
+	_ = logger.FlushUser(ctx, "", anonID)
+	got = getLatestQuery(t, logger, anonID)
+	if got != "data" {
+		t.Errorf("expected 'data', got '%s'", got)
+	}
 
 }
 
@@ -127,6 +137,11 @@ func TestLoggedInUserSearch(t *testing.T) {
 	got := getLatestQuery(t, logger, userID)
 	if got != "caterpillar" {
 		t.Errorf("expected 'caterpillar', got '%s'", got)
+	}
+	_ = logger.FlushUser(ctx, userID, "")
+	got = getLatestQuery(t, logger, userID)
+	if got != "dog" {
+		t.Errorf("expected 'dog', got '%s'", got)
 	}
 }
 
@@ -145,7 +160,7 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 
 	// Wait a bit less than TTL and flush
 	time.Sleep(9 * time.Second)
-	_ = logger.FlushUser(ctx, anonID)
+	_ = logger.FlushUser(ctx, "", anonID)
 
 	// Now log unrelated query
 	_ = logger.LogSearch(ctx, userID, ua, "world")
@@ -153,5 +168,57 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 	got := getLatestQuery(t, logger, anonID)
 	if got != "hello" {
 		t.Errorf("expected 'hello', got '%s'", got)
+	}
+	_ = logger.FlushUser(ctx, "", anonID)
+	got = getLatestQuery(t, logger, anonID)
+	if got != "world" {
+		t.Errorf("expected 'world', got '%s'", got)
+	}
+}
+
+func TestMultipleAnonUsers(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+
+	ua1 := "AnonA"
+	ua2 := "AnonB"
+	id1 := generateAnonID(ua1)
+	id2 := generateAnonID(ua2)
+
+	_ = logger.LogSearch(ctx, "", ua1, "alpha")
+	_ = logger.LogSearch(ctx, "", ua2, "beta")
+
+	_ = logger.FlushUser(ctx, "", id1)
+	_ = logger.FlushUser(ctx, "", id2)
+
+	got1 := getLatestQuery(t, logger, id1)
+	got2 := getLatestQuery(t, logger, id2)
+
+	if got1 != "alpha" {
+		t.Errorf("expected 'alpha' for anon1, got '%s'", got1)
+	}
+	if got2 != "beta" {
+		t.Errorf("expected 'beta' for anon2, got '%s'", got2)
+	}
+}
+
+func TestEmptySearchNotFlushed(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+
+	userID := "test-user-empty"
+	_ = logger.LogSearch(ctx, userID, "", "")
+	_ = logger.FlushUser(ctx, userID, "")
+
+	// Should not write anything
+	var count int
+	err := logger.DB.QueryRow(`
+		SELECT COUNT(*) FROM user_searches WHERE user_id = $1
+	`, userID).Scan(&count)
+	if err != nil {
+		t.Fatalf("DB error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 entries, got %d", count)
 	}
 }
