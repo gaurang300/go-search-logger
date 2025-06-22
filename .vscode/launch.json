@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    
+    {
+      "name": "Run Main",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/main.go"
+    },
+    {
+      "name": "Debug Tests (All)",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${workspaceFolder}"
+    },
+    {
+      "name": "Debug Tests (Current File)",
+      "type": "go",
+      "request": "launch",
+      "mode": "test",
+      "program": "${fileDirname}"
+    }
+  ]
+}
