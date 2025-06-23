@@ -172,6 +172,12 @@ func TestLoggedInUserSearch(t *testing.T) {
 func TestTTLExpiryTriggersWrite(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
 	ua := "AgentX"
 	userID := ""
 
@@ -181,8 +187,7 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 	anonID := generateAnonID(ua)
 
 	// Wait a bit less than TTL and flush
-	time.Sleep(9 * time.Second)
-	_ = logger.FlushUser(ctx, "", anonID)
+	time.Sleep(8 * time.Second)
 
 	// Now log unrelated query
 	_ = logger.LogSearch(ctx, userID, ua, "world")
@@ -191,7 +196,7 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 	if got != "hello" {
 		t.Errorf("expected 'hello', got '%s'", got)
 	}
-	_ = logger.FlushUser(ctx, "", anonID)
+	time.Sleep(11 * time.Second)
 	got = getLatestQuery(t, logger, anonID)
 	if got != "world" {
 		t.Errorf("expected 'world', got '%s'", got)
