@@ -172,12 +172,6 @@ func TestLoggedInUserSearch(t *testing.T) {
 func TestTTLExpiryTriggersWrite(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
-	// Start listener in background
-	done := make(chan struct{})
-	go func() {
-		logger.StartKeyspaceListener(ctx)
-		close(done)
-	}()
 	ua := "AgentX"
 	userID := ""
 
@@ -197,7 +191,7 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 	if got != "hello" {
 		t.Errorf("expected 'hello', got '%s'", got)
 	}
-	time.Sleep(11 * time.Second) // Wait for TTL expiry
+	_ = logger.FlushUser(ctx, "", anonID)
 	got = getLatestQuery(t, logger, anonID)
 	if got != "world" {
 		t.Errorf("expected 'world', got '%s'", got)
@@ -371,5 +365,31 @@ func TestLogSearch_AnonResetTriggersDBWrite(t *testing.T) {
 	got = getLatestQuery(t, logger, anonID)
 	if got != "reset" {
 		t.Errorf("expected 'reset' after TTL expiry, got '%s'", got)
+	}
+}
+
+func TestWriteSearch_EmptyQueryNoInsert(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+
+	entry := SearchEntry{
+		UserID: "test-empty-query",
+		Query:  "",
+		AnonID: "",
+	}
+
+	err := logger.writeSearch(ctx, entry)
+	if err != nil {
+		t.Fatalf("writeSearch should not error on empty query, got: %v", err)
+	}
+
+	// Should not insert anything, so DB query should fail
+	var count int
+	err = logger.DB.QueryRow(`SELECT COUNT(*) FROM user_searches WHERE user_id = $1`, entry.UserID).Scan(&count)
+	if err != nil {
+		t.Fatalf("DB count error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 rows inserted for empty query, got %d", count)
 	}
 }

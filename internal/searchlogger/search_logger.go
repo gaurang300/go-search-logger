@@ -93,6 +93,10 @@ func (l *Logger) LogSearch(ctx context.Context, userID, userAgent, query string)
 
 // writeSearch writes the user's search query to the SQL database in a transaction.
 func (l *Logger) writeSearch(ctx context.Context, entry SearchEntry) error {
+	if entry.Query == "" {
+		log.Printf("writeSearch: empty query for userID=%s, skipping write", entry.UserID)
+		return nil
+	}
 	tx, err := l.DB.BeginTx(ctx, nil)
 	if err != nil {
 		log.Printf("writeSearch: error starting transaction for userID=%s: %v", entry.UserID, err)
@@ -130,6 +134,7 @@ func generateAnonID(userAgent string) string {
 // StartKeyspaceListener listens to Redis key expiry events and flushes expired queries to the DB.
 func (l *Logger) StartKeyspaceListener(ctx context.Context) {
 	pubsub := l.Redis.PSubscribe(ctx, "__keyevent@0__:expired")
+	defer pubsub.Close()
 	ch := pubsub.Channel()
 
 	log.Println("Started Redis keyspace listener")
