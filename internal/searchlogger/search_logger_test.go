@@ -78,6 +78,19 @@ func TestLogSearchAndWrite(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
 
+	// Enable Redis keyspace notifications for expired events
+	err := logger.Redis.ConfigSet(ctx, "notify-keyspace-events", "Ex").Err()
+	if err != nil {
+		t.Fatalf("Failed to enable keyspace notifications: %v", err)
+	}
+
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
+
 	userAgent := "TestBrowser/1.0"
 	userID := ""
 	query := "testquery"
@@ -87,10 +100,10 @@ func TestLogSearchAndWrite(t *testing.T) {
 	_ = logger.LogSearch(ctx, userID, userAgent, "tes")
 	_ = logger.LogSearch(ctx, userID, userAgent, "testq")
 	_ = logger.LogSearch(ctx, userID, userAgent, query)
-	_ = logger.LogSearch(ctx, userID, userAgent, "testquery")
 
 	anonID := generateAnonID(userAgent)
-	_ = logger.FlushUser(ctx, "", anonID)
+	// _ = logger.FlushUser(ctx, "", anonID)
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
 	searchText := getLatestQuery(t, logger, anonID)
 	if searchText != query {
 		t.Errorf("expected 'testquery', got '%s'", searchText)
@@ -101,6 +114,12 @@ func TestLogSearchAndWrite(t *testing.T) {
 func TestAnonSearchReset(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
 
 	ua := "TestAgent"
 	userID := ""
@@ -116,19 +135,23 @@ func TestAnonSearchReset(t *testing.T) {
 	if got != "business" {
 		t.Errorf("expected 'business', got '%s'", got)
 	}
-	_ = logger.FlushUser(ctx, "", anonID)
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
 	got = getLatestQuery(t, logger, anonID)
 	if got != "data" {
 		t.Errorf("expected 'data', got '%s'", got)
 	}
-
 }
 
 // TestLoggedInUserSearch checks that the last full query before a reset is written for logged-in users.
 func TestLoggedInUserSearch(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
-
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
 	userID := "user123"
 	_ = logger.LogSearch(ctx, userID, "", "cat")
 	_ = logger.LogSearch(ctx, userID, "", "caterpillar")
@@ -138,7 +161,7 @@ func TestLoggedInUserSearch(t *testing.T) {
 	if got != "caterpillar" {
 		t.Errorf("expected 'caterpillar', got '%s'", got)
 	}
-	_ = logger.FlushUser(ctx, userID, "")
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
 	got = getLatestQuery(t, logger, userID)
 	if got != "dog" {
 		t.Errorf("expected 'dog', got '%s'", got)
@@ -149,7 +172,12 @@ func TestLoggedInUserSearch(t *testing.T) {
 func TestTTLExpiryTriggersWrite(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
-
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
 	ua := "AgentX"
 	userID := ""
 
@@ -169,7 +197,7 @@ func TestTTLExpiryTriggersWrite(t *testing.T) {
 	if got != "hello" {
 		t.Errorf("expected 'hello', got '%s'", got)
 	}
-	_ = logger.FlushUser(ctx, "", anonID)
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
 	got = getLatestQuery(t, logger, anonID)
 	if got != "world" {
 		t.Errorf("expected 'world', got '%s'", got)
@@ -202,23 +230,146 @@ func TestMultipleAnonUsers(t *testing.T) {
 	}
 }
 
-func TestEmptySearchNotFlushed(t *testing.T) {
+func TestLogSearch_EmptyQueryIgnored(t *testing.T) {
 	ctx := context.Background()
 	logger := setupLogger(t)
-
-	userID := "test-user-empty"
-	_ = logger.LogSearch(ctx, userID, "", "")
-	_ = logger.FlushUser(ctx, userID, "")
-
-	// Should not write anything
-	var count int
-	err := logger.DB.QueryRow(`
-		SELECT COUNT(*) FROM user_searches WHERE user_id = $1
-	`, userID).Scan(&count)
+	userID := "test-empty"
+	userAgent := "TestAgent"
+	err := logger.LogSearch(ctx, userID, userAgent, "   ")
 	if err != nil {
-		t.Fatalf("DB error: %v", err)
+		t.Errorf("expected no error for empty query, got %v", err)
 	}
-	if count != 0 {
-		t.Errorf("expected 0 entries, got %d", count)
+	// Should not write anything to Redis or DB
+	val, _ := logger.Redis.Get(ctx, buildRedisKey(userID)).Result()
+	if val != "" {
+		t.Errorf("expected no value in Redis for empty query, got '%s'", val)
+	}
+}
+
+func TestLogSearch_AnonUserStoresAnonID(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+	userID := ""
+	userAgent := "AnonTestAgent"
+	query := "search term"
+	anonID := generateAnonID(userAgent)
+
+	err := logger.LogSearch(ctx, userID, userAgent, query)
+	if err != nil {
+		t.Fatalf("LogSearch error: %v", err)
+	}
+	val, _ := logger.Redis.Get(ctx, buildRedisKey(anonID)).Result()
+	if val != normalizeQuery(query) {
+		t.Errorf("expected Redis to store normalized query '%s', got '%s'", normalizeQuery(query), val)
+	}
+}
+
+func TestLogSearch_LoggedInUserStoresUserID(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+	userID := "test-user"
+	userAgent := "TestAgent"
+	query := "MyQuery"
+
+	err := logger.LogSearch(ctx, userID, userAgent, query)
+	if err != nil {
+		t.Fatalf("LogSearch error: %v", err)
+	}
+	val, _ := logger.Redis.Get(ctx, buildRedisKey(userID)).Result()
+	if val != normalizeQuery(query) {
+		t.Errorf("expected Redis to store normalized query '%s', got '%s'", normalizeQuery(query), val)
+	}
+}
+
+func TestLogSearch_ResetTriggersDBWrite(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+	userID := "test-reset"
+	userAgent := "TestAgent"
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
+	// First query
+	err := logger.LogSearch(ctx, userID, userAgent, "alpha")
+	if err != nil {
+		t.Fatalf("LogSearch error: %v", err)
+	}
+	// Second query is a prefix extension (should not trigger DB write)
+	err = logger.LogSearch(ctx, userID, userAgent, "alphabet")
+	if err != nil {
+		t.Fatalf("LogSearch error: %v", err)
+	}
+	// Third query is a reset (completely different)
+	err = logger.LogSearch(ctx, userID, userAgent, "beta")
+	if err != nil {
+		t.Fatalf("LogSearch error: %v", err)
+	}
+	// The DB should have "alphabet" as the last search before reset
+	got := getLatestQuery(t, logger, userID)
+	if got != "alphabet" {
+		t.Errorf("expected 'alphabet' to be written to DB, got '%s'", got)
+	}
+	// Now check the latest query after TTL expiry
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
+	got = getLatestQuery(t, logger, userID)
+	if got != "beta" {
+		t.Errorf("expected 'beta' after TTL expiry, got '%s'", got)
+	}
+}
+
+func TestLogSearch_PrefixExtensionDoesNotWriteDB(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+	userID := "test-prefix"
+	userAgent := "TestAgent"
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
+	_ = logger.LogSearch(ctx, userID, userAgent, "foo")
+	_ = logger.LogSearch(ctx, userID, userAgent, "foob")
+	_ = logger.LogSearch(ctx, userID, userAgent, "fooba")
+	_ = logger.LogSearch(ctx, userID, userAgent, "foobar")
+
+	// No reset, so nothing should be written to DB yet
+	// Wait for TTL expiry and flush
+	time.Sleep(11 * time.Second)
+	got := getLatestQuery(t, logger, userID)
+	if got != "foobar" {
+		t.Errorf("expected 'foobar' after TTL expiry, got '%s'", got)
+	}
+}
+
+func TestLogSearch_AnonResetTriggersDBWrite(t *testing.T) {
+	ctx := context.Background()
+	logger := setupLogger(t)
+	userID := ""
+	userAgent := "AnonResetAgent"
+	anonID := generateAnonID(userAgent)
+	// Start listener in background
+	done := make(chan struct{})
+	go func() {
+		logger.StartKeyspaceListener(ctx)
+		close(done)
+	}()
+	_ = logger.LogSearch(ctx, userID, userAgent, "one")
+	_ = logger.LogSearch(ctx, userID, userAgent, "two")
+	_ = logger.LogSearch(ctx, userID, userAgent, "three")
+	_ = logger.LogSearch(ctx, userID, userAgent, "reset") // triggers DB write
+
+	got := getLatestQuery(t, logger, anonID)
+	if got != "three" {
+		t.Errorf("expected 'three' to be written to DB, got '%s'", got)
+	}
+	// Now check the latest query after TTL expiry
+	time.Sleep(11 * time.Second) // Wait for TTL expiry
+	got = getLatestQuery(t, logger, anonID)
+	if got != "reset" {
+		t.Errorf("expected 'reset' after TTL expiry, got '%s'", got)
 	}
 }
